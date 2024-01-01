@@ -1,0 +1,223 @@
+---
+title: "eCommerce Customer Segmentation and RFM Analysis"
+output:
+  html_document: default
+  pdf_document: default
+date: "2023-12-12"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## eCommerce Customer Segmentation 
+
+In this project, we delve into a RFM (Recency, Frequency, Monetary) analysis of ecommerce customers' data from 2016 to 2018, provided by a Brazilian eCommerce company Olist.
+
+Our objective is to derive insight from the spending habits of customers, such as how long ago their purchase was, how much it was, how frequently they purchase things (if any), and put them into categories of customers. 
+
+We do not yet know what kind of customers we may find, but based on our own habits of purchasing, we could hypothesize certain types, such as: consumers that consistently spend money on a relatively moderate level (loyal customers), consumers that only commit 1 large purchases from time to time (perodic large spenders), and customers who have only purchased 1 thing a long time ago and has never come back since (lost customers). 
+
+Let's first import all of our data. 
+
+```{r}
+customers <- read.csv("olist_customers_dataset.csv");
+geolocation <- read.csv("olist_geolocation_dataset.csv");
+order_items <- read.csv("olist_order_items_dataset.csv");
+order_payments <- read.csv("olist_order_payments_dataset.csv");
+order_reviews <- read.csv("olist_order_reviews_dataset.csv");
+orders <- read.csv("olist_orders_dataset.csv");
+payments <- read.csv("olist_products_dataset.csv");
+sellers <- read.csv("olist_sellers_dataset.csv");
+```
+
+Now we import all of our required libraries.
+
+```{r}
+# install.packages('tidyverse');
+# install.packages('lubridate');
+# install.packages('hms');
+# install.packages('scales');
+# install.packages('dplyr');
+# install.packages('ggplot2');
+# install.packages('cluster');
+# install.packages('scales');
+# install.packages('factoextra');
+
+library(dplyr);
+library(ggplot2);
+library(cluster);
+library(tidyverse);
+library(lubridate);
+library(hms);
+library(scales);
+library(factoextra);
+```
+To get a better understanding of the data given, let's take a look at the schema provided: 
+
+
+![Schema](ecommerce_schema.png)
+
+
+
+As we can see, we have lots of data that we can use. However, for our purposes of customer segmentation, we will focus on the olist_customer_dataset and olist_orders_dataset that is linked by customer_id. We wish to pivot our RFM analysis on specific customers by their customer_id.
+
+So, we combine the two files, olist_orders_dataset and olist_customer_dataset.
+
+```{r}
+orders_customers <- merge(orders, customers, by = "customer_id")
+data <- merge(orders_customers, order_payments, by = "order_id")
+head(data)
+```
+
+Now we move on to the actual RFM (Recency, Frequency, Monetary) analysis of the data. 
+
+To analyze the Recency of each customer, we look at their last valid purchase of anything in the data.
+
+To analyze the Frequency of each customer, we look at the time passed since each of their purchases over the timeline of the data. 
+
+To analyze the Monetary of each customer, we look at the dollar amount (or rather Reals since this is a Brazilian company) of each customer has incurred. 
+
+```{r}
+#Frequency analysis
+frequency <- data %>%
+  group_by(customer_unique_id) %>%
+  summarise(Frequency = n_distinct(order_id))
+
+#Monetary analysis
+monetary <- data %>%
+  group_by(customer_unique_id) %>%
+  summarise(Monetary = sum(payment_value))
+
+# Ensure order_purchase_timestamp is in date-time format
+data$order_purchase_timestamp <- ymd_hms(data$order_purchase_timestamp)
+```
+
+To perform the Recency analysis, we note the fact that this data ranges from 2016 to 2018. To analyze the recency of data that is more than 5 years old would be confusing, so we use the latest recoreded time on the data. 
+
+```{r}
+max_time <- max(data$order_purchase_timestamp)
+
+# Calculate Recency
+recency <- data %>%
+  group_by(customer_unique_id) %>%
+  summarise(Last_Purchase_Date = max(order_purchase_timestamp)) %>%
+  mutate(Recency = as.numeric(difftime(max_time, Last_Purchase_Date, units = "days")))
+
+```
+
+Now we aggregate all of the data together and sort them by the unique customer id, and normalize them. 
+
+```{r}
+frm_data <- merge(frequency, monetary, by = "customer_unique_id")
+frm_data <- merge(frm_data, recency[,c("customer_unique_id", "Recency")], by = "customer_unique_id")
+
+frm_data_normalized <- frm_data[, c("Frequency", "Monetary", "Recency")]
+frm_data_normalized <- scale(frm_data_normalized)
+```
+
+We now move onto the k-means classification. In the introduction of this project, we said that we don't know the exact number of segmentations. However, for our purposes, we can safely assume that there would not exist more than 10 types of customers. So, we try each number of segmentation from 1 to 10, and find the number of clusters that yields the lowest total variance (WCSS).
+
+```{r}
+wcss <- sapply(1:10, function(k) {
+  sum(kmeans(frm_data_normalized, centers = k, nstart = 20)$withinss)
+})
+
+plot(1:10, wcss, type = "b", xlab = "Number of Clusters", ylab = "Within groups sum of squares")
+```
+
+Here, we employ the Elbow Method to determine the number of clusters. It looks like the clusters total variance decreases quite a bit after 6 clusters. Let's then use 6. 
+
+```{r}
+optimal_k <- 6 #6 is the value identified from the Elbow Method
+km.out <- kmeans(frm_data_normalized, centers = optimal_k, nstart = 20)
+```
+
+
+We see that the Sum of Squres Regression score is about 76.9%, which isn't too bad. We now use the above classifications to assign customer cluster to each individual customer id.
+
+```{r}
+frm_data$Cluster <- km.out$cluster
+```
+
+Now, we have a total of 16 columns, which we can't view. However, we can use Principal Component Analysis to extract the two most important features in the data so that we may visualize the clusters.
+
+```{r}
+# since we cant visualize all dimensions, perform PCA to extract two most important features 
+pca_result <- prcomp(frm_data_normalized, center = TRUE, scale. = TRUE)
+frm_data_pca <- data.frame(pca_result$x[,1:2]) # Extract the first two principal components
+frm_data_pca$Cluster <- km.out$cluster # Add cluster information
+
+ggplot(frm_data_pca, aes(x = PC1, y = PC2,  color = as.factor(Cluster))) +
+  geom_point(alpha = 0.5) +
+  theme_minimal() +
+  labs(color = "Cluster")
+
+```
+
+We have the 6 clusters, but we don't exactly know what they mean. Let's take a look at their characteristics: 
+
+```{r}
+
+cluster_profiles <- aggregate(frm_data[, c("Frequency", "Monetary", "Recency")], 
+                              by = list(Cluster = frm_data$Cluster), 
+                              mean)
+cluster_profiles
+```
+
+From what we can see from the FRM analysis, we could deduce the following: 
+
+Cluster Analysis Interpretation:
+
+## Cluster 1: High-Frequency, Moderate-Monetary, Recent Customers
+
+Frequency: 2.1 (above 1, which suggests multiple purchases)
+Monetary: $292.07 (moderate spending)
+Recency: 268.77 days (relatively recent activity)
+Interpretation: Engaged customers who make purchases relatively frequently and have shopped in the last year. They are not big spenders but are consistent.
+Strategy: Encourage continued engagement through loyalty programs, personalized marketing, and regular updates on new products that match their purchase history.
+
+## Cluster 2: One-Time, Low-Monetary, Inactive Customers
+
+Frequency: 1 (single purchase)
+Monetary: $121.67 (lower spending)
+Recency: 305.03 days (almost a year since last purchase)
+Interpretation: One-time shoppers who may have tried a product or service but have not returned.
+Strategy: Re-engagement campaigns with incentives to make a second purchase, collecting feedback to understand their lack of repeat purchases.
+
+
+## Cluster 3: One-Time, Low-Monetary, Potential Return Customers
+
+Frequency: 1 (single purchase)
+Monetary: $126.24 (similar to Cluster 2)
+Recency: 136.24 days (relatively recent purchase)
+Interpretation: Newer customers who have made a single purchase recently. There's potential for these customers to return.
+Strategy: Initiate follow-up communication to encourage a second purchase. Provide offers that are time-sensitive to capitalize on their recent engagement.
+
+## Cluster 4: Low-Frequency, High-Monetary, Moderately Inactive Customers
+
+Frequency: 1.07 (mostly single purchases with few repeat customers)
+Monetary: $2166.79 (very high spending)
+Recency: 287.13 days (less recent activity)
+Interpretation: Likely to be customers who made significant one-off purchases, possibly due to a major need or an attractive offer.
+Strategy: Upsell related products or accessories, offer extended warranties, and keep them engaged with after-sales services.
+
+## Cluster 5: One-Time, Low-Monetary, Long-Lost Customers
+
+Frequency: 1 (single purchase)
+Monetary: $127.16 (lower spending)
+Recency: 509.41 days (long time since last purchase)
+Interpretation: Customers who have not engaged for a long time and had low spending. These are likely churned or lost customers.
+Strategy: Reactivation efforts with compelling deals or information about significant changes/improvements to products or services since their last purchase.
+
+## Cluster 6: One-Time, Moderate-High-Monetary, Seasonal Customers
+
+Frequency: 1 (single purchase)
+Monetary: $735.04 (moderately high spending)
+Recency: 279.46 days (about 9 months since last purchase)
+Interpretation: Customers who may be occasional shoppers, potentially making seasonal or periodic large purchases.
+Strategy: Engage with targeted campaigns during likely purchase periods, offer loyalty incentives for additional purchases outside their normal buying pattern.
+
+## potential future strategy:
+With this clustering, we can monitor incoming customer data to predict which cluster new customers are likely to fall into and proactively manage your engagement with them. Additionally, we can track the migration of customers between clusters over time to identify trends and adjust strategies accordingly.
+
